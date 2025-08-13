@@ -20,32 +20,60 @@ TOKEN_LIMIT_ARGUMENT = (
 
 
 class DebaterQuality(DebaterBase):
+    def split_claims(self, argument: str) -> list:
+    # 先把 \\n 替换为真正的换行符
+        if argument is None:
+            print("[SPLIT WARNING] argument is None!")
+            return []
+        if not isinstance(argument, str):
+            print(f"[SPLIT WARNING] non-str argument: {type(argument)} -> {argument}")
+            return []
+        if argument.strip() == "":
+            print(f"[SPLIT WARNING] empty string! raw={repr(argument)}")
+            return []
+        argument = argument.replace("\\n", "\n")
+        # 按多种标点分割（包含英文/中文标点、换行、冒号等）
+        claims = re.split(r'[。.;,，!！?？:\n]', argument)
+        claims = [c.strip() for c in claims if c.strip()]
+        print(f"[SPLIT DEBUG] claims({len(claims)}): {claims} | content: {argument}")
+        if len(claims) == 0:
+            print(f"[SPLIT WARNING] claims == 0 | content: {argument}")
+        elif len(claims) == 1:
+            print(f"[SPLIT INFO] only one claim: {claims} | content: {argument}")
+        elif len(claims) > 2:
+            print(f"[SPLIT WARNING] claims > 2: {len(claims)} | content: {argument}")
+            print(f"[SPLIT WARNING] claims: {claims}")
+        return claims
+    
     def get_transcript_string(self, transcript: TranscriptConfig):
+        from ranking_similarity.rank_anchor import joint_rank_and_select
         transcript, _ = TranscriptParser.verify_strict(transcript)
         our_name, opponent_name = self.names_from_transcript(transcript)
         transcript_string = ""
         for i, round in enumerate(transcript.rounds):
             our_arg, opponent_arg = self.args_from_round(round)
-            transcript_string += f"Round {i + 1}:\n\n"
             if round.judge is not None and len(round.judge) > 0:
                 judge_name = "Judge"
                 transcript_string += f'{judge_name}: """{round.judge}"""\n\n'
-            if round.cross_examiner is not None and len(round.cross_examiner) > 0:
-                cross_examiner_name = transcript.names.cross_examiner or "Judge"
-                transcript_string += (
-                    f'{cross_examiner_name}: """{round.cross_examiner}"""\n\n'
-                )
-            transcript_string += (
-                f'{our_name}: """{our_arg}"""\n\n' if our_arg is not None else ""
-            )
-            if self.method == Method.debate:
-                transcript_string += (
-                    f'{opponent_name}: """{opponent_arg}"""\n\n'
-                    if opponent_arg is not None
-                    else ""
-                )
-            if i + 1 < len(transcript.rounds):
-                # Don't add separator after last round
+            # 分割每轮 claims
+            claims1 = self.split_claims(our_arg) if our_arg is not None else []
+            claims2 = self.split_claims(opponent_arg) if opponent_arg is not None else []
+            orig_n1, orig_n2 = len(claims1), len(claims2)
+            # 每轮筛选
+            if claims1 and claims2:
+                selected_indices, joint_scores = joint_rank_and_select(claims1, claims2, top_ratio=0.7)
+                selected_claims1 = [claims1[j] for j in selected_indices]
+                selected_claims2 = [claims2[j] for j in selected_indices]
+            else:
+                selected_claims1 = claims1
+                selected_claims2 = claims2
+            keep_ratio1 = len(selected_claims1) / orig_n1 if orig_n1 else 0
+            keep_ratio2 = len(selected_claims2) / orig_n2 if orig_n2 else 0
+            print(f"Round {i+1}: claims1 keep ratio {keep_ratio1:.2f}, claims2 keep ratio {keep_ratio2:.2f}")
+            for c1, c2 in zip(selected_claims1, selected_claims2):
+                transcript_string += f"Ranked Round {i + 1}:\n\n"
+                transcript_string += f'{our_name}: """{c1}"""\n\n'
+                transcript_string += f'{opponent_name}: """{c2}"""\n\n'
                 transcript_string += f"{SEPARATOR}\n\n"
         return transcript_string.strip()
 

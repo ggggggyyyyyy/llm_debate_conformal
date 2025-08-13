@@ -169,6 +169,8 @@ class QualitySimRollout(RolloutBase):
                 # )
             LOGGER.info(f"Completed: {transcript.index}")
 
+        print("[Debug] transcript_string:", transcript_string)
+
         return {
             "transcript": transcript_string,
             "complete": complete,

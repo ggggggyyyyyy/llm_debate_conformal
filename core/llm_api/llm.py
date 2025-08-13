@@ -5,7 +5,9 @@ from collections import defaultdict
 from itertools import chain
 from pathlib import Path
 from typing import Callable, Literal, Optional, Union
-
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import TextStreamer
+import torch
 import attrs
 
 from core.llm_api.anthropic_llm import ANTHROPIC_MODELS, AnthropicChatModel
@@ -22,6 +24,7 @@ from core.utils import load_secrets
 
 LOGGER = logging.getLogger(__name__)
 
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 @attrs.define()
 class ModelAPI:
@@ -35,6 +38,10 @@ class ModelAPI:
     _openai_base: OpenAIBaseModel = attrs.field(init=False)
     _openai_chat: OpenAIChatModel = attrs.field(init=False)
     _anthropic_chat: AnthropicChatModel = attrs.field(init=False)
+
+    llama_tokenizer: Optional[AutoTokenizer] = attrs.field(init=False, default=None)
+    llama_model: Optional[AutoModelForCausalLM] = attrs.field(init=False, default=None)
+    llama_model_path: Optional[str] = attrs.field(init=False, default="models/Llama-3.2-3b")
 
     running_cost: float = attrs.field(init=False, default=0)
     model_timings: dict[str, list[float]] = attrs.field(init=False, default={})
@@ -54,10 +61,14 @@ class ModelAPI:
             organization=secrets[self.organization],
             print_prompt_and_response=self.print_prompt_and_response,
         )
-        self._anthropic_chat = AnthropicChatModel(
-            num_threads=self.anthropic_num_threads,
-            print_prompt_and_response=self.print_prompt_and_response,
-        )
+        # self._anthropic_chat = AnthropicChatModel(
+        #     num_threads=self.anthropic_num_threads,
+        #     print_prompt_and_response=self.print_prompt_and_response,
+        # )
+        if os.path.exists(self.llama_model_path):
+            self.llama_tokenizer = AutoTokenizer.from_pretrained(self.llama_model_path)
+            self.llama_model = AutoModelForCausalLM.from_pretrained(self.llama_model_path, torch_dtype=torch.float16).cuda()
+            #self.llama_model = AutoModelForCausalLM.from_pretrained(self.llama_model_path, torch_dtype=torch.float16).to("cpu")
         Path("./prompt_history").mkdir(exist_ok=True)
 
     async def call_single(
@@ -132,6 +143,52 @@ class ModelAPI:
         assert (
             "max_tokens_to_sample" not in kwargs
         ), "max_tokens_to_sample should be passed in as max_tokens."
+
+        # ===== 本地Llama模型分支 =====
+        # 支持 model_ids 为字符串或单元素列表
+        llama_flag = False
+        llama_model_id = "llama"
+        if isinstance(model_ids, str):
+            llama_flag = llama_model_id in model_ids.lower()
+        elif isinstance(model_ids, list) and len(model_ids) == 1 and llama_model_id in model_ids[0].lower():
+            llama_flag = True
+
+        if llama_flag:
+            if self.llama_model is None or self.llama_tokenizer is None:
+                raise RuntimeError("Llama model not loaded or path not set.")
+            if isinstance(prompt, list):
+                prompt = "".join([x.get("content", "") for x in prompt])
+            #print(f"[Llama] Generating for prompt: {prompt[:200]}")  # 打印前200字符
+            # 先对 prompt 字符串做截断（比如8000字符）
+            # if isinstance(prompt, str) and len(prompt) > 8000:
+            #     print(f"[Llama][Warning] prompt超长: {len(prompt)}，截断到8000字符")
+            #     prompt = prompt[-8000:]
+            inputs = self.llama_tokenizer(prompt, return_tensors="pt").to("cuda")
+
+            max_input_tokens = 4096 - (max_tokens if max_tokens is not None else 256)
+            if inputs['input_ids'].shape[1] > max_input_tokens:
+                print(f"[Llama][Warning] input_ids超长: {inputs['input_ids'].shape[1]}, 自动截断到{max_input_tokens}")
+                inputs['input_ids'] = inputs['input_ids'][:, -max_input_tokens:]
+            
+            if len(prompt.strip()) == 0:
+                print("[Llama][Warning] Prompt is empty!")
+                
+            outputs = self.llama_model.generate(**inputs, max_new_tokens=max_tokens)
+            completion = self.llama_tokenizer.decode(outputs[0], skip_special_tokens=True)
+            # print(f"[Llama] Completion (last 300): {completion[-300:]}")
+            print(f"[Llama] max_tokens (max_new_tokens): {max_tokens}")
+            response = LLMResponse(
+                completion=completion,
+                model_id="Llama-3.2-3b",
+                stop_reason="length",  # 新增这一行，推荐用 "length" 或 "stop"
+                cost=0.0,
+                api_duration=0.0,
+                duration=0.0,
+            )
+            return [response]
+
+        # ===== OpenAI/Anthropic API分支 =====
+        # Check if model_ids is a string or a list of strings
 
         if isinstance(model_ids, str):
             model_ids = [model_ids]

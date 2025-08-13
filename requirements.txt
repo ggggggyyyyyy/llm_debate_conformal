@@ -26,3 +26,11 @@ trueskill
 typer[all]
 uvicorn[standard]==0.22.0
 wandb
+
+nltk
+rank_bm25
+spacy
+toml
+munch
+conditionalconformal
+

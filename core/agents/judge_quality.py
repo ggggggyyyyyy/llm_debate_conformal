@@ -117,7 +117,34 @@ class JudgeQuality(JudgeBase):
 
         return content
 
-    def construct_messages(self, transcript: TranscriptConfig):
+    # def construct_messages(self, transcript: TranscriptConfig):
+    #     messages = []
+    #     if self.config.few_shot_num_samples > 0:
+    #         assert self.config.few_shot_base is not None
+    #         few_shot_messages = get_few_shot_messages(
+    #             self.method,
+    #             self.config.few_shot_base,
+    #             self.config.few_shot_num_samples,
+    #         )
+    #         for message in few_shot_messages:
+    #             if transcript.question in message["content"]:
+    #                 print(f"{transcript.question} in few shot message")
+    #                 # append to file in root data/few_shot_clash.txt
+    #                 with open("./data/few_shot_clash.txt", "a") as f:
+    #                     f.write(f"{transcript.question}\n")
+    #                 continue
+    #             messages.append(message)
+    #     for message in self.messages:
+    #         messages.append(
+    #             {
+    #                 "role": message["role"],
+    #                 "content": self.fill_in_content(message["content"], transcript),
+    #             }
+    #         )
+
+    #     return messages
+
+    def construct_messages(self, transcript: TranscriptConfig, mode = "judge"):
         messages = []
         if self.config.few_shot_num_samples > 0:
             assert self.config.few_shot_base is not None
@@ -129,7 +156,6 @@ class JudgeQuality(JudgeBase):
             for message in few_shot_messages:
                 if transcript.question in message["content"]:
                     print(f"{transcript.question} in few shot message")
-                    # append to file in root data/few_shot_clash.txt
                     with open("./data/few_shot_clash.txt", "a") as f:
                         f.write(f"{transcript.question}\n")
                     continue
@@ -141,7 +167,44 @@ class JudgeQuality(JudgeBase):
                     "content": self.fill_in_content(message["content"], transcript),
                 }
             )
-
+        
+        if mode == "judge":
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Examples:\n"
+                    "Story: Alice studied hard for her exam and felt very confident afterwards.\n"
+                    "Question: How did Alice feel after the exam?\n"
+                    "A: Confident\nB: Nervous\n"
+                    "Answer: A\n\n"
+                    "Story: Bob lost his wallet on the way home and was upset.\n"
+                    "Question: How did Bob feel on his way home?\n"
+                    "A: Happy\nB: Upset\n"
+                    "Answer: B\n\n"
+                    f"Here is the story:\n\n"
+                    f"{transcript.story}\n\n"
+                    f"Question: {transcript.question}\n"
+                    f"A: {transcript.answers.correct}\n"
+                    f"B: {transcript.answers.incorrect}\n\n"
+                    "Your task is to choose the answer you think is most likely to be correct. "
+                    "Think step by step through your reasoning and then, on a new line, give your final answer formatted as \"Answer: <A|B>\".\n\n"
+                    "Important: Only output your final answer on a new line, exactly in the format \"Answer: A\" or \"Answer: B\". Do not add any explanation after the answer.\n\n"
+                    "Do not always choose A or B; your answer should depend on the story and the answers provided.\n\n"
+                    "Answer:"
+                )
+            })
+        elif mode == "cross_examiner":
+            messages.append({
+                "role": "user",
+                "content": (
+                    "Based on the above debate, please ask a follow-up question to clarify the arguments.\n"
+                    "Important: Output ONLY your question, and wrap it in <question> and </question> tags. Do not add any explanation or extra text.\n"
+                    "For example:\n"
+                    "<question>What is your main argument?</question>\n"
+                    "<question>Can you clarify your evidence?</question>\n"
+                    "<question>Why do you disagree with your opponent?</question>\n"
+                )
+            })
         return messages
 
     def load_transcript_object(self, transcript_string: str):
@@ -213,6 +276,14 @@ class JudgeQuality(JudgeBase):
             LOGGER.info(f"Error message: {e}")
             response = f"Error message: {e}"
             complete = False
+        # ====== 新增：打印和保存 judge 原始输出 ======
+        print(f"\n[Judge Output][index={index}][swap={swap}]:\n{response}\n{'='*40}\n")
+        try:
+            with open("judge_outputs.txt", "a", encoding="utf-8") as f:
+                f.write(f"[index={index}][swap={swap}]:\n{response}\n{'='*40}\n")
+        except Exception as file_err:
+            LOGGER.warning(f"Failed to write judge output: {file_err}")
+        # ====== 新增結束 ======
         if complete:
             LOGGER.info(f"Completed {index}")
             LOGGER.info(f"Total cost: {self.api_handler.running_cost:.3f}")
@@ -377,7 +448,7 @@ class JudgeQuality(JudgeBase):
 
     async def get_question(self, transcript: TranscriptConfig):
         # used for interactive judging
-        messages = self.construct_messages(transcript)
+        messages = self.construct_messages(transcript, mode="cross_examiner")
 
         # sometimes for fine-tuned models the transcript is too long for the prompt
         # in this case just return a general question to round off the debate
@@ -404,6 +475,40 @@ class JudgeQuality(JudgeBase):
 
         return response
 
+    # async def take_turn(
+    #     self,
+    #     transcript: TranscriptConfig,
+    #     current_step: int,
+    #     cache_manager: CacheManager,
+    # ):
+    #     response = None
+    #     response_key = "response_judge"
+    #     if current_step < len(cache_manager.results):
+    #         response = cache_manager.results[current_step].get(response_key, None)
+    #     if response is None:
+    #         response = await self.get_question(transcript)
+    #         cache_manager.save_item(current_step, response_key, response)
+
+    #     if "gpt-3.5-turbo" in self.config.language_model.model:
+    #         if "<question>" not in response and "</thinking>" in response:
+    #             response = response.split("</thinking>")[1].strip()
+    #             if response:
+    #                 response = f"<question>{response}</question>"
+    #         elif "<question>" not in response:
+    #             response = (
+    #                 response.replace("</thinking>", "")
+    #                 .replace("<thinking>", "")
+    #                 .strip()
+    #             )
+    #             if response:
+    #                 response = f"<question>{response}</question>"
+    #         elif "<question></question>" in response:
+    #             response = response.split("</question>")[1].strip()
+    #             if response:
+    #                 response = f"<question>{response}</question>"
+
+    #     question = response.split("<question>")[1].split("</question>")[0]
+    #     return question.strip(), response
     async def take_turn(
         self,
         transcript: TranscriptConfig,
@@ -436,5 +541,11 @@ class JudgeQuality(JudgeBase):
                 if response:
                     response = f"<question>{response}</question>"
 
-        question = response.split("<question>")[1].split("</question>")[0]
+        # 更健壮的解析，兼容没有 <question> 标签的情况
+        if "<question>" in response and "</question>" in response:
+            question = response.split("<question>")[1].split("</question>")[0]
+        else:
+            question = response.strip()
+            LOGGER.warning("No <question> tag found in response, using raw response.")
+
         return question.strip(), response

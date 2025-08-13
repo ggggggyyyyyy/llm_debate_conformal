@@ -144,3 +144,4 @@ prompt_history/*
 prompt_history
 wandb/
 .hydra/
+models/
